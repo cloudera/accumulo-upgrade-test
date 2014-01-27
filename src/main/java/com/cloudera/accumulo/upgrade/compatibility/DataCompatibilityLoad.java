@@ -26,14 +26,17 @@ import java.util.TreeSet;
 
 import static org.apache.accumulo.core.conf.Property.*;
 import org.apache.accumulo.core.client.TableExistsException;
-import org.apache.accumulo.core.client.ZooKeeperInstance;
+import org.apache.accumulo.core.client.AccumuloException;
+import org.apache.accumulo.core.client.AccumuloSecurityException;
 import org.apache.accumulo.core.client.admin.TableOperations;
-import org.apache.accumulo.core.client.mapreduce.AccumuloOutputFormat;
 import org.apache.accumulo.core.data.Mutation;
 import org.apache.accumulo.core.data.Value;
-import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.core.security.ColumnVisibility;
 
+import com.cloudera.accumulo.upgrade.util.ConnectionCli;
+import com.cloudera.accumulo.upgrade.util.MapreduceOutputCli;
+import com.cloudera.accumulo.upgrade.util.Cli;
+import com.cloudera.accumulo.upgrade.util.VisibilityCli;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Longs;
@@ -54,13 +57,11 @@ import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-
-import com.beust.jcommander.IStringConverter;
-import com.beust.jcommander.JCommander;
-import com.beust.jcommander.Parameter;
-import com.beust.jcommander.ParameterException;
+import org.apache.hadoop.mapreduce.Counter;
 
 import org.apache.log4j.Logger;
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.ParameterException;
 
 /**
  * MapReduce job to load tables in a variety of Accumulo serializations.
@@ -94,9 +95,8 @@ public class DataCompatibilityLoad extends Configured implements Tool {
 
   protected static final String OUTPUT_TABLE_NAMES = DataCompatibilityLoad.class.getName() + ".output-table-names";
   protected static final String VISIBILITY = DataCompatibilityLoad.class.getName() + ".visibility";
-
-  protected static final ColumnVisibility EMPTY_VISIBILITY = new ColumnVisibility(); 
-  protected static final Authorizations EMPTY_AUTHORIZATIONS = new Authorizations();
+  protected static final String[] FAMILIES = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+                                               "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
 
   /**
    * Mapper that outputs directly to all of the configured tables.
@@ -121,11 +121,11 @@ public class DataCompatibilityLoad extends Configured implements Tool {
       }
     }
 
-    private static final String FAMILY_COUNTER_GROUP = DataLoadMapper.class.getName() + ".family_cells";
+    private Counter rowCells;
 
     @Override
     public void map(Text family, LongWritable numCells, Context context) throws IOException, InterruptedException {
-      final Counter counter = context.getCounter(FAMILY_COUNTER_GROUP, family.toString());
+      final Counter familyCells = context.getCounter(DataLoadMapper.class.getName(), "family_" + family.toString());
       for (long i = 0; i < numCells.get(); i++) {
         long timestamp = System.currentTimeMillis();
         qualifier.set(Long.toString(i));
@@ -137,15 +137,18 @@ public class DataCompatibilityLoad extends Configured implements Tool {
         digest.update(Longs.toByteArray(timestamp));
         value.set(digest.digest());
         mutation.put(family, qualifier, visibility, timestamp, value);
-        counter.increment(1l);
+        familyCells.increment(1l);
+        rowCells.increment(1l);
       }
       context.progress();
     }
     
     @Override
     public void setup(Context context) throws IOException, InterruptedException {
-      mutation = new Mutation(new StringBuilder(context.getTaskAttemptID().getTaskID().toString()).reverse());
+      final String row = new StringBuilder(context.getTaskAttemptID().getTaskID().toString()).reverse().toString();
+      mutation = new Mutation(row);
       visibility = new ColumnVisibility(context.getConfiguration().get(VISIBILITY, ""));
+      rowCells = context.getCounter(DataLoadMapper.class.getName(), "row_" + row);
     }
 
     @Override
@@ -165,12 +168,12 @@ public class DataCompatibilityLoad extends Configured implements Tool {
   }
 
   /**
-   * given a configurable number of splits, generates records for each one of the form:
+   * given a configurable number of rows, generates records for each one of the form:
    *   Key: one letter A through Z, Value: user specified number of qualifiers
    */
   public static class DataLoadInputFormat extends InputFormat<Text, LongWritable> {
     protected static final String NUM_QUALIFIERS = DataLoadInputFormat.class.getName() + ".num_qualifiers";
-    protected static final String NUM_SPLITS = DataLoadInputFormat.class.getName() + ".num_splits";
+    protected static final String NUM_ROWS = DataLoadInputFormat.class.getName() + ".num_rows";
     protected static final String ACTIVE_TRACKERS = DataLoadInputFormat.class.getName() + ".active_trackers";
 
     @Override
@@ -181,17 +184,17 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     @Override
     public List<InputSplit> getSplits(JobContext context) throws IOException, InterruptedException {
       final long numCells = getNumQualifiersPerFamily(context.getConfiguration());
-      final int numSplits = getNumSplits(context.getConfiguration());
+      final int numRows = getNumRows(context.getConfiguration());
       final List<String> trackers = getActiveTrackers(context.getConfiguration());;
-      final List<InputSplit> splits = new ArrayList<InputSplit>(numSplits);
+      final List<InputSplit> splits = new ArrayList<InputSplit>(numRows);
       if (trackers.size() == 0) {
         log.warn("Couldn't get set of active trackers on the cluster, map tasks won't have locality information");
-        for (int i = 0; i < numSplits; i++) {
+        for (int i = 0; i < numRows; i++) {
           splits.add(new MapperSlotInputSplit(numCells, null));
         }
       } else {
-        for (int i = 0; i < numSplits;) {
-          for (int j = 0; j < trackers.size() && i < numSplits; j++, i++) {
+        for (int i = 0; i < numRows;) {
+          for (int j = 0; j < trackers.size() && i < numRows; j++, i++) {
             splits.add(new MapperSlotInputSplit(numCells, trackers.get(j)));
           }
         }
@@ -213,15 +216,15 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     }
 
     public static long getNumQualifiersPerFamily(Configuration conf) {
-      return conf.getLong(NUM_QUALIFIERS, DEFAULT_NUM_QUALIFIERS);
+      return conf.getLong(NUM_QUALIFIERS, DataCompatibilityTestCli.DEFAULT_NUM_QUALIFIERS);
     }
 
-    public static void setNumSplits(Job job, int num) {
-      job.getConfiguration().setLong(NUM_SPLITS, num);
+    public static void setNumRows(Job job, int num) {
+      job.getConfiguration().setLong(NUM_ROWS, num);
     }
 
-    public static int getNumSplits(Configuration conf) {
-      return conf.getInt(NUM_SPLITS, DEFAULT_NUM_SPLITS);
+    public static int getNumRows(Configuration conf) {
+      return conf.getInt(NUM_ROWS, DataCompatibilityTestCli.DEFAULT_NUM_ROWS);
     }
 
     public static class MapperSlotInputSplit extends InputSplit {
@@ -247,8 +250,6 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     protected static class DataLoadRecordReader extends RecordReader<Text, LongWritable> {
       protected boolean valid;
       protected int current;
-      protected static final String[] FAMILIES = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-                                                   "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
       protected final Text key = new Text();
       protected final LongWritable value = new LongWritable();
 
@@ -323,93 +324,113 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     }
   }
 
-  /* TODO most of this is pulled out of 1.5's cli.Help hierarchy, move it into a 1.4 to 1.5 compat layer */
-
-  @Parameter(names = {"-u", "--user"}, description = "Connection user")
-  public String principal = System.getProperty("user.name");
-  
-  @Parameter(names = {"-p", "--password"}, description = "Connection password", password= true)
-  public String password = null;
-
-  @Parameter(names = {"-z", "--keepers"}, description = "Comma separated list of zookeeper hosts (host:port,host:port). defaults to 'localhost' on default ZK port.")
-  public String zookeepers = "localhost:2181";
-  
-  @Parameter(names = {"-i", "--instance"}, description = "The name of the accumulo instance")
-  public String instance = null;
-  
-  @Parameter(names = {"-auths", "--auths"}, converter = AuthConverter.class, description = "the authorizations to use when reading or writing")
-  public Authorizations auths = EMPTY_AUTHORIZATIONS;
-
-  @Parameter(names = {"-v", "--visibility"}, converter = VisibilityConverter.class, description = "the visibility expression to user when writing cells. defaults to blank.")
-  public ColumnVisibility visibility = EMPTY_VISIBILITY;
-  
-  @Parameter(names={"-h", "-?", "--help", "-help"}, help=true)
-  public boolean help = false;  
-
-  @Parameter(names = {"-t", "--tables"}, required = false, description = "comma separated list of pre-existing tables to write to, instead of making our own.")
-  public String tables = null;
-
-  @Parameter(names = {"--prefix"}, required = false, description = "prefix to use on generated table names. Defaults to 'data_compatibility_test_'.")
-  public String prefix = "data_compatibility_test_";
-
-  @Parameter(names = {"--num-splits"}, required = false, description = "number of splits to use on given tables. we'll generate one mapper for each. defaults to # of MR slots.")
-  public int numSplits = -1;
-
-  protected static final int DEFAULT_NUM_SPLITS = 2;
-  protected static final long DEFAULT_NUM_QUALIFIERS = 300000l;
-
-  @Parameter(names = {"-n", "--num-qualifiers"}, required = false, description = "number of column qualifiers per column family. effectively sets number of cells per cf. defaults to 300k.")
-  public long qualifiers = DEFAULT_NUM_QUALIFIERS;
-
   /* TODO add an option to drop tables that exist at the beginning of the run. */
+  protected static class DataCompatibilityTestCli {
+
+    @Parameter(names = {"--num-rows"}, required = false, description = "number of rows to use on given tables.")
+    public int numRows = -1;
+
+    public static final int DEFAULT_NUM_ROWS = 2;
+    public static final long DEFAULT_NUM_QUALIFIERS = 300000l;
+
+    @Parameter(names = {"-n", "--num-qualifiers"}, required = false, description = "number of column qualifiers per column family. effectively sets number of cells per cf. defaults to 300k.")
+    public long qualifiers = DEFAULT_NUM_QUALIFIERS;
+
+    @Parameter(names = {"-t", "--tables"}, required = false, description = "comma separated list of pre-existing tables to write to, instead of making our own.")
+    public String tables = null;
+
+    @Parameter(names = {"--prefix"}, required = false, description = "prefix to use on generated table names. Defaults to 'data_compatibility_test_'.")
+    public String prefix = "data_compatibility_test_";
+
+    public List<String> getTableNames(TableOperations ops) throws ParameterException, AccumuloException, AccumuloSecurityException {
+      return getTableNames(false, ops);
+    }
+
+    public List<String> getTableNamesAndConfigureThem(TableOperations ops) throws ParameterException, AccumuloException, AccumuloSecurityException {
+      return getTableNames(true, ops);
+    }
+
+    protected List<String> getTableNames(boolean change, TableOperations ops) throws ParameterException, AccumuloException, AccumuloSecurityException {
+      List<String> names;
+      if (null != tables) {
+        names = Arrays.asList(tables.split(","));
+        for (String name : names) {
+          if (!ops.exists(name)) {
+            String error = "Table specified that does not exist: " + name;
+            log.error(error);
+            throw new ParameterException(error);
+          }
+        }
+      } else {
+        final TableOptions[] options = TableOptions.values();
+        names = new ArrayList<String>(options.length);
+        for (TableOptions option : options) {
+          final String name = prefix + option.toString();
+          if (!ops.exists(name)) {
+            if (change) {
+              try {
+                ops.create(name);
+              } catch (TableExistsException exception) {
+                log.debug("Table created concurrently.",  exception);
+              }
+            } else {
+              String error = "Generated table name doesn't exist: " + name;
+              log.error(error);
+              throw new ParameterException(error);
+            }
+          }
+          if (change) {
+            for (Map.Entry<String, String> property : option.getProperties().entrySet()) {
+              ops.setProperty(name, property.getKey(), property.getValue());
+            }
+          }
+          names.add(name);
+        }
+      }
+      return names;
+    }
+  }
+
+
+  protected static class LoadCli extends Cli {
+    public final ConnectionCli connection = new ConnectionCli();
+    public final VisibilityCli visibility = new VisibilityCli();
+    public final DataCompatibilityTestCli test = new DataCompatibilityTestCli();
+    public final MapreduceOutputCli output = new MapreduceOutputCli(connection);
+
+    protected void parseArgs(String programName, String[] args, Object ... others) {
+      super.parseArgs(programName, args, connection, visibility, test, output);
+    }
+  };
+
+  protected LoadCli options = new LoadCli();
 
   @Override
   public int run(String[] args) throws Exception {
     final String jobName = this.getClass().getName();
-    parseArgs(jobName, args);
+    options.parseArgs(jobName, args);
     final Job job = new Job(getConf(), jobName);
 
-    if (-1 == numSplits) {
-      numSplits = job.getConfiguration().getInt("mapred.map.tasks", DEFAULT_NUM_SPLITS);
+    if (-1 == options.test.numRows) {
+      options.test.numRows = job.getConfiguration().getInt("mapred.map.tasks", DataCompatibilityTestCli.DEFAULT_NUM_ROWS);
     }
 
     job.setJarByClass(this.getClass());
     
     job.setInputFormatClass(DataLoadInputFormat.class);
     DataLoadInputFormat.inferActiveTrackers(job);
-    DataLoadInputFormat.setNumSplits(job, numSplits);
-    DataLoadInputFormat.setNumQualifiersPerFamily(job, qualifiers);
+    DataLoadInputFormat.setNumRows(job, options.test.numRows);
+    DataLoadInputFormat.setNumQualifiersPerFamily(job, options.test.qualifiers);
 
-    job.getConfiguration().set(VISIBILITY, visibility.toString());
+    job.getConfiguration().set(VISIBILITY, options.visibility.visibility.toString());
 
-    List<String> names;
-    final TableOperations ops = new ZooKeeperInstance(instance, zookeepers).getConnector(principal, password).tableOperations();
+    final TableOperations ops = options.connection.getConnector().tableOperations();
  
-    if (null != tables) {
-      names = Arrays.asList(tables.split(","));
-    } else {
-      final TableOptions[] options = TableOptions.values();
-      names = new ArrayList<String>(options.length);
-      for (TableOptions option : options) {
-        final String name = prefix + option.toString();
-        if (!ops.exists(name)) {
-          try {
-            ops.create(name);
-          } catch (TableExistsException exception) {
-            log.debug("Table created concurrently.",  exception);
-          }
-        }
-        for (Map.Entry<String, String> property : option.getProperties().entrySet()) {
-          ops.setProperty(name, property.getKey(), property.getValue());
-        }
-        names.add(name);
-      }
-    }
-
+    final List<String> names = options.test.getTableNamesAndConfigureThem(ops);
     for (String name : names) {
-      if (numSplits > ops.getSplits(name, numSplits).size()) {
+      if (options.test.numRows > ops.getSplits(name, options.test.numRows).size()) {
         final SortedSet<Text> splits = new TreeSet<Text>();
-        for (int i = 0; i < numSplits; i++) {
+        for (int i = 0; i < options.test.numRows; i++) {
           splits.add(new Text(new StringBuilder(Long.toString(i)).reverse().toString()));
         }
         ops.addSplits(name, splits);
@@ -425,9 +446,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     
     job.setNumReduceTasks(0);
     
-    job.setOutputFormatClass(AccumuloOutputFormat.class);
-    AccumuloOutputFormat.setZooKeeperInstance(job, instance, zookeepers);
-    AccumuloOutputFormat.setOutputInfo(job, principal, password.getBytes(), false, null);
+    options.output.useAccumuloOutputFormat(job);
     
     job.waitForCompletion(true);
     return job.isSuccessful() ? 0 : 1;
@@ -438,46 +457,4 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     System.exit(res);
   }
 
-  /* TODO pull all of this into a 1.4 to 1.5 compat layer */
-
-  protected void parseArgs(String programName, String[] args, Object ... others) {
-    JCommander commander = new JCommander();
-    commander.addObject(this);
-    for (Object other : others)
-      commander.addObject(other);
-    commander.setProgramName(programName);
-    try {
-      commander.parse(args);
-    } catch (ParameterException ex) {
-      commander.usage();
-      exitWithError(ex.getMessage(), 1);
-    }
-    if (help) {
-      commander.usage();
-      exit(0);
-    }
-  }
-  
-  protected void exit(int status) {
-    System.exit(status);
-  }
-  
-  protected void exitWithError(String message, int status) {
-    System.err.println(message);
-    exit(status);
-  }
-
-  public static class AuthConverter implements IStringConverter<Authorizations> {
-    @Override
-    public Authorizations convert(String value) {
-      return new Authorizations(value.split(","));
-    }
-  }
-
-  public static class VisibilityConverter implements IStringConverter<ColumnVisibility> {
-    @Override
-    public ColumnVisibility convert(String value) {
-      return new ColumnVisibility(value);
-    }
-  }
 }
