@@ -14,11 +14,14 @@
  */
 package com.cloudera.accumulo.upgrade.compatibility;
 
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Map;
 import java.util.List;
 import java.util.SortedSet;
@@ -44,6 +47,8 @@ import com.google.common.primitives.Longs;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.WritableComparable;
+import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.InputSplit;
@@ -100,15 +105,16 @@ public class DataCompatibilityLoad extends Configured implements Tool {
 
   /**
    * Mapper that outputs directly to all of the configured tables.
-   * Keeps all the cells for one row in memory at a time.
    */
   public static class DataLoadMapper extends Mapper<Text, LongWritable, Text, Mutation> {
 
-    private Mutation mutation;
+    private final Text row = new Text();
     private ColumnVisibility visibility;
     private final Text qualifier = new Text();
     private final MessageDigest digest;
     private final Value value = new Value();
+    private final Text out = new Text();
+    private Collection<String> tables;
 
     {
       MessageDigest temp = null;
@@ -126,6 +132,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     @Override
     public void map(Text family, LongWritable numCells, Context context) throws IOException, InterruptedException {
       final Counter familyCells = context.getCounter(DataLoadMapper.class.getName(), "family_" + family.toString());
+      final Mutation mutation = new Mutation(row);
       for (long i = 0; i < numCells.get(); i++) {
         long timestamp = System.currentTimeMillis();
         qualifier.set(Long.toString(i));
@@ -141,30 +148,25 @@ public class DataCompatibilityLoad extends Configured implements Tool {
         rowCells.increment(1l);
       }
       context.progress();
-    }
-    
-    @Override
-    public void setup(Context context) throws IOException, InterruptedException {
-      final String row = new StringBuilder(context.getTaskAttemptID().getTaskID().toString()).reverse().toString();
-      mutation = new Mutation(row);
-      visibility = new ColumnVisibility(context.getConfiguration().get(VISIBILITY, ""));
-      rowCells = context.getCounter(DataLoadMapper.class.getName(), "row_" + row);
-    }
-
-    @Override
-    public void cleanup(Context context) throws IOException, InterruptedException {
-      String[] tables = context.getConfiguration().getStrings(OUTPUT_TABLE_NAMES);
-      if (tables == null) {
-        /* Use the default table. */
+      if (tables.isEmpty()) {
+        /* Use the default table */
         context.write(null, mutation);
       } else {
-        final Text out = new Text();
         for(String table : tables) {
           out.set(table);
           context.write(out, mutation);
         }
       }
     }
+
+    @Override
+    public void setup(Context context) throws IOException, InterruptedException {
+      row.set(new StringBuilder(context.getTaskAttemptID().getTaskID().toString()).reverse().toString());
+      visibility = new ColumnVisibility(context.getConfiguration().get(VISIBILITY, ""));
+      rowCells = context.getCounter(DataLoadMapper.class.getName(), "row_" + row);
+      tables = context.getConfiguration().getStringCollection(OUTPUT_TABLE_NAMES);
+    }
+
   }
 
   /**
@@ -208,7 +210,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     }
 
     public static List<String> getActiveTrackers(Configuration conf) {
-      return Arrays.asList(conf.getStrings(ACTIVE_TRACKERS, new String[0]));
+      return new ArrayList<String>(conf.getStringCollection(ACTIVE_TRACKERS));
     }
 
     public static void setNumQualifiersPerFamily(Job job, long num) {
@@ -227,7 +229,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
       return conf.getInt(NUM_ROWS, DataCompatibilityTestCli.DEFAULT_NUM_ROWS);
     }
 
-    public static class MapperSlotInputSplit extends InputSplit {
+    public static class MapperSlotInputSplit extends InputSplit implements WritableComparable<MapperSlotInputSplit> {
       long numCells;
       String[] locations;
       public MapperSlotInputSplit() {
@@ -244,6 +246,18 @@ public class DataCompatibilityLoad extends Configured implements Tool {
       @Override
       public String[] getLocations() {
         return locations;
+      }
+      @Override
+      public void write(DataOutput out) throws IOException {
+        WritableUtils.writeVLong(out, numCells);
+      }
+      @Override
+      public void readFields(DataInput in) throws IOException {
+        numCells = WritableUtils.readVLong(in);
+      }
+      @Override
+      public int compareTo(MapperSlotInputSplit other) {
+        return (int) (numCells - other.numCells);
       }
     }
 
@@ -422,7 +436,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     DataLoadInputFormat.setNumRows(job, options.test.numRows);
     DataLoadInputFormat.setNumQualifiersPerFamily(job, options.test.qualifiers);
 
-    job.getConfiguration().set(VISIBILITY, options.visibility.visibility.toString());
+    job.getConfiguration().set(VISIBILITY, new String(options.visibility.visibility.getExpression(), "UTF-8"));
 
     final TableOperations ops = options.connection.getConnector().tableOperations();
  
