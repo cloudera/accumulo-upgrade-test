@@ -241,7 +241,7 @@ public class DataCompatibilityVerify extends Configured implements Tool {
           }
         }
       }
-
+      log.info("All internal checks passed.");
       return success ? 0 : 1;
     } finally {
       options.input.close();
@@ -249,7 +249,7 @@ public class DataCompatibilityVerify extends Configured implements Tool {
   }
 
   public static void main(String[] args) throws Exception {
-    int res = ToolRunner.run(new Configuration(), new DataCompatibilityLoad(), args);
+    int res = ToolRunner.run(new Configuration(), new DataCompatibilityVerify(), args);
     System.exit(res);
   }
 }
