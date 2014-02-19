@@ -15,23 +15,25 @@
 package com.cloudera.accumulo.upgrade.util;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.Random;
-import java.util.List;
-import java.util.Set;
 import java.util.ArrayList;
-import org.apache.accumulo.core.data.Range;
-import org.apache.accumulo.core.client.TableNotFoundException;
-import org.apache.accumulo.core.client.TableExistsException;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
+
 import org.apache.accumulo.core.client.AccumuloException;
 import org.apache.accumulo.core.client.AccumuloSecurityException;
+import org.apache.accumulo.core.client.TableExistsException;
+import org.apache.accumulo.core.client.TableNotFoundException;
 import org.apache.accumulo.core.client.admin.TableOperations;
 import org.apache.accumulo.core.client.mapreduce.AccumuloInputFormat;
-import org.apache.hadoop.mapreduce.Job;
+import org.apache.accumulo.core.client.security.tokens.PasswordToken;
+import org.apache.accumulo.core.data.Range;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapreduce.Job;
 import org.apache.log4j.Logger;
+
 import com.beust.jcommander.Parameter;
-import com.beust.jcommander.ParameterException;
 
 public class MapreduceInputCli {
 
@@ -65,7 +67,7 @@ public class MapreduceInputCli {
     job.setInputFormatClass(AccumuloInputFormat.class);
     /* XXX Need to use a method that exists in 1.4 adn 1.5  :( */
     Configuration configuration = job.getConfiguration();
-    AccumuloInputFormat.setZooKeeperInstance(configuration, connection.instance, connection.zookeepers);
+    AccumuloInputFormat.setZooKeeperInstance(job, connection.instance, connection.zookeepers);
     final TableOperations ops = connection.getConnector().tableOperations();
 
     String scan = table;
@@ -78,17 +80,21 @@ public class MapreduceInputCli {
       } finally {
         clones.add(scan);
       }
-      AccumuloInputFormat.setScanOffline(configuration, true);
+      AccumuloInputFormat.setOfflineTableScan(job, true);
     }
 
-    AccumuloInputFormat.setInputInfo(configuration, connection.principal, connection.password.getBytes(), scan, connection.auths);
+    PasswordToken token = new PasswordToken(connection.password);
+
+    AccumuloInputFormat.setConnectorInfo(job, connection.principal, token);
+    AccumuloInputFormat.setInputTableName(job, scan);
+    AccumuloInputFormat.setScanAuthorizations(job, connection.auths);
 
     if (0 < maxMaps) {
       // set up ranges
       try {
         Set<Range> ranges = ops.splitRangeByTablets(table, new Range(), maxMaps);
-        AccumuloInputFormat.setRanges(configuration, ranges);
-        AccumuloInputFormat.disableAutoAdjustRanges(configuration);
+        AccumuloInputFormat.setRanges(job, ranges);
+        AccumuloInputFormat.setAutoAdjustRanges(job, false);
       } catch (Exception e) {
         throw new IOException(e);
       }

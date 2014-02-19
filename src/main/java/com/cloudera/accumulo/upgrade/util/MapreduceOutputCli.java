@@ -14,9 +14,10 @@
  */
 package com.cloudera.accumulo.upgrade.util;
 
-import org.apache.hadoop.mapreduce.Job;
-import org.apache.hadoop.conf.Configuration;
+import org.apache.accumulo.core.client.AccumuloSecurityException;
 import org.apache.accumulo.core.client.mapreduce.AccumuloOutputFormat;
+import org.apache.accumulo.core.client.security.tokens.PasswordToken;
+import org.apache.hadoop.mapreduce.Job;
 
 public class MapreduceOutputCli {
 
@@ -26,15 +27,19 @@ public class MapreduceOutputCli {
 
   protected final ConnectionCli connection;
 
-  public void useAccumuloOutputFormat(Job job) {
+  public void useAccumuloOutputFormat(Job job) throws AccumuloSecurityException {
     useAccumuloOutputFormat(job, null);
   }
 
-  public void useAccumuloOutputFormat(Job job, String table) {
+  public void useAccumuloOutputFormat(Job job, String table) throws AccumuloSecurityException {
     job.setOutputFormatClass(AccumuloOutputFormat.class);
-    Configuration configuration = job.getConfiguration();
-    AccumuloOutputFormat.setZooKeeperInstance(configuration, connection.instance, connection.zookeepers);
-    AccumuloOutputFormat.setOutputInfo(configuration, connection.principal, connection.password.getBytes(), false, table);
+    AccumuloOutputFormat.setZooKeeperInstance(job, connection.instance, connection.zookeepers);
+
+    PasswordToken token = new PasswordToken(connection.password);
+
+    AccumuloOutputFormat.setConnectorInfo(job, connection.principal, token);
+    AccumuloOutputFormat.setCreateTables(job, false);
+    AccumuloOutputFormat.setDefaultTableName(job, table);
   }
 
 
