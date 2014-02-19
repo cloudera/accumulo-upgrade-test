@@ -15,6 +15,7 @@
 package com.cloudera.accumulo.upgrade.util;
 
 import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.accumulo.core.client.mapreduce.AccumuloOutputFormat;
 
 public class MapreduceOutputCli {
@@ -31,8 +32,9 @@ public class MapreduceOutputCli {
 
   public void useAccumuloOutputFormat(Job job, String table) {
     job.setOutputFormatClass(AccumuloOutputFormat.class);
-    AccumuloOutputFormat.setZooKeeperInstance(job, connection.instance, connection.zookeepers);
-    AccumuloOutputFormat.setOutputInfo(job, connection.principal, connection.password.getBytes(), false, table);
+    Configuration configuration = job.getConfiguration();
+    AccumuloOutputFormat.setZooKeeperInstance(configuration, connection.instance, connection.zookeepers);
+    AccumuloOutputFormat.setOutputInfo(configuration, connection.principal, connection.password.getBytes(), false, table);
   }
 
 

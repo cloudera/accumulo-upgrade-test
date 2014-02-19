@@ -28,6 +28,7 @@ import org.apache.accumulo.core.client.AccumuloSecurityException;
 import org.apache.accumulo.core.client.admin.TableOperations;
 import org.apache.accumulo.core.client.mapreduce.AccumuloInputFormat;
 import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.log4j.Logger;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
@@ -62,7 +63,9 @@ public class MapreduceInputCli {
    */
   public void useAccumuloInputFormat(Job job, String table, boolean offline) throws IOException, AccumuloException, AccumuloSecurityException, TableExistsException, TableNotFoundException {
     job.setInputFormatClass(AccumuloInputFormat.class);
-    AccumuloInputFormat.setZooKeeperInstance(job, connection.instance, connection.zookeepers);
+    /* XXX Need to use a method that exists in 1.4 adn 1.5  :( */
+    Configuration configuration = job.getConfiguration();
+    AccumuloInputFormat.setZooKeeperInstance(configuration, connection.instance, connection.zookeepers);
     final TableOperations ops = connection.getConnector().tableOperations();
 
     String scan = table;
@@ -75,17 +78,17 @@ public class MapreduceInputCli {
       } finally {
         clones.add(scan);
       }
-      AccumuloInputFormat.setScanOffline(job.getConfiguration(), true);
+      AccumuloInputFormat.setScanOffline(configuration, true);
     }
 
-    AccumuloInputFormat.setInputInfo(job, connection.principal, connection.password.getBytes(), scan, connection.auths);
+    AccumuloInputFormat.setInputInfo(configuration, connection.principal, connection.password.getBytes(), scan, connection.auths);
 
     if (0 < maxMaps) {
       // set up ranges
       try {
         Set<Range> ranges = ops.splitRangeByTablets(table, new Range(), maxMaps);
-        AccumuloInputFormat.setRanges(job, ranges);
-        AccumuloInputFormat.disableAutoAdjustRanges(job);
+        AccumuloInputFormat.setRanges(configuration, ranges);
+        AccumuloInputFormat.disableAutoAdjustRanges(configuration);
       } catch (Exception e) {
         throw new IOException(e);
       }
