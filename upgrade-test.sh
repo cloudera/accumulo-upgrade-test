@@ -20,7 +20,8 @@
 # 3) file with all nodes (def cluster.txt)
 # 4) access to tarball of 1.4.x and 1.6.x
 # 5) access to upgrade test tools compiled against each
-# 6) all gc,tracer, monitor roles also in masters
+# 6) all gc, tracer, monitor roles also in masters
+# 7) ACCUMULO_CONF_DIR/monitor has a single line
 
 # Variables you must set based on your cluster
 INSTANCE=${INSTANCE:-instance}
@@ -74,7 +75,7 @@ pssh -i -h ${HOSTS} \
   sudo chown -R accumulo: $TARGET \; \
   sudo -i alternatives --install /usr/lib/accumulo accumulo-lib ${TARGET} 50 \; \
   sudo -i alternatives --set accumulo-lib ${TARGET} \; \
-  sudo -i -u accumulo make -C ${TARGET}/src/server/src/main/c++/ \; \
+  sudo -i -u accumulo make --quiet -C ${TARGET}/src/server/src/main/c++/ \; \
 
 echo "Init"
 # Init the old
@@ -150,6 +151,14 @@ echo "Wait for upgrade to finish."
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.root'
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.metadata'
 
+RESULT=""
+while [[ "$RESULT" != "<unassignedTablets>0</unassignedTablets>" ]]; do
+  sleep 5
+  RESULT=$(curl `cat ${ACCUMULO_CONF_DIR}/monitor`:50095/xml 2>/dev/null \
+    | grep unassignedTablets)
+  echo "$RESULT"
+done
+
 echo "Verify data."
 # Verify
 printf "${ROOTPW}\n" | /usr/lib/accumulo/bin/tool.sh ${UPGRADE_TEST_16_JAR} \
@@ -167,9 +176,13 @@ echo "Compact"
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'compact -p data_.*'
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'compact -p accumulo..*'
 
-# TODO use the fate admin printer to look to see if compactions are done?
 # wait
-sleep 120
+RESULT=""
+while [[ $RESULT != " 0 transactions" ]]; do
+  sleep 5
+  RESULT=$($ACCUMULO shell -u root -p ${ROOTPW} -e 'fate print')
+  echo "$RESULT"
+done
 
 echo "restart."
 # Restart and verify again
@@ -180,8 +193,18 @@ for role in gc monitor tracer master; do
   pssh -h $ACCUMULO_CONF_DIR/masters -i 'sudo pkill -f [D]app='$role \; :
 done
 pssh -h ${HOSTS} -i 'sudo su - accumulo -c /usr/lib/accumulo/bin/start-here.sh'
+
+# Wait for second online
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.root'
 $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.metadata'
+RESULT=""
+while [[ "$RESULT" != "<unassignedTablets>0</unassignedTablets>" ]]; do
+  sleep 5
+  RESULT=$(curl `cat ${ACCUMULO_CONF_DIR}/monitor`:50095/xml 2>/dev/null \
+    | grep unassignedTablets)
+  echo "$RESULT"
+done
+
 echo "verify."
 printf "${ROOTPW}\n" | /usr/lib/accumulo/bin/tool.sh ${UPGRADE_TEST_16_JAR} \
   com.cloudera.accumulo.upgrade.compatibility.DataCompatibilityVerify \
