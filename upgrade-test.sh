@@ -22,6 +22,7 @@
 # 5) access to upgrade test tools compiled against each
 # 6) all gc, tracer, monitor roles also in masters
 # 7) ACCUMULO_CONF_DIR/monitor has a single line
+# 8) ability to run MR jobs as current user
 
 # Variables you must set based on your cluster
 INSTANCE=${INSTANCE:-instance}
