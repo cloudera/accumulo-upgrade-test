@@ -241,7 +241,11 @@ public class DataCompatibilityVerify extends Configured implements Tool {
           }
         }
       }
-      log.info("All internal checks passed.");
+      if (success) {
+        log.info("All internal checks passed.");
+      } else {
+        log.info("Some checks failed. see log.");
+      }
       return success ? 0 : 1;
     } finally {
       options.input.close();
