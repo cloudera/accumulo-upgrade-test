@@ -49,14 +49,32 @@ done
 # Convenience
 ACCUMULO="sudo -i -u accumulo /usr/lib/accumulo/bin/accumulo"
 
+function stop_all {
+  for role in tserver logger; do
+    pssh -h $ACCUMULO_CONF_DIR/slaves -i 'sudo pkill -f [D]app='$role \; :
+  done
+  for role in gc monitor tracer master; do
+    pssh -h $ACCUMULO_CONF_DIR/masters -i 'sudo pkill -f [D]app='$role \; :
+  done
+}
+
+function wait_online {
+  $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.root'
+  $ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.metadata'
+
+  RESULT=""
+  URL=$(cat ${ACCUMULO_CONF_DIR}/monitor):50095/xml
+  while [[ "$RESULT" != "<unassignedTablets>0</unassignedTablets>" ]]; do
+    # TODO limit the number of retries?
+    sleep 5
+    RESULT=$(curl $URL 2>/dev/null | grep unassignedTablets)
+    echo "$RESULT"
+  done
+}
+
 echo "Clean up."
 # Clean up cruft
-for role in tserver logger; do
-  pssh -h $ACCUMULO_CONF_DIR/slaves -i 'sudo pkill -f [D]app='$role \; :
-done
-for role in gc monitor tracer master; do
-  pssh -h $ACCUMULO_CONF_DIR/masters -i 'sudo pkill -f [D]app='$role \; :
-done
+stop_all
 sudo -u hdfs hdfs dfs -rm -r /accumulo /user/accumulo
 # TODO kill outstanding MR jobs, in case they are data load/verify runs.
 hdfs dfs -rm -r data-compatibility-verify
@@ -97,13 +115,10 @@ if [[ $? -ne 0 ]]; then
   exit 1
 fi
 
+$ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t !METADATA'
+
 echo "Shutdown."
-for role in tserver logger; do
-  pssh -h $ACCUMULO_CONF_DIR/slaves -i 'sudo pkill -f [D]app='$role \; :
-done
-for role in gc monitor tracer master; do
-  pssh -h $ACCUMULO_CONF_DIR/masters -i 'sudo pkill -f [D]app='$role \; :
-done
+stop_all
 
 echo "Review internals."
 # Gather some information
@@ -125,7 +140,7 @@ pscp -h ${HOSTS} ${TARBALL_16} $HOME
 TARGET=/usr/lib/accumulo-upgrade
 pssh -h ${HOSTS} \
   sudo rm /var/log/accumulo/\* \; \
-  sudo rm -rf $TARGET \; \
+  sudo rm -rf ${TARGET} \; \
   sudo mkdir -p ${TARGET} \; \
   sudo tar -C ${TARGET} --strip 1 -xzf ${HOME}/${TARBALL_16} \; \
   sudo chown -R accumulo: $TARGET \; \
@@ -148,16 +163,7 @@ pssh -h ${HOSTS} -i 'sudo su - accumulo -c /usr/lib/accumulo/bin/start-here.sh'
 
 echo "Wait for upgrade to finish."
 # Wait for things to come online..
-$ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.root'
-$ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.metadata'
-
-RESULT=""
-while [[ "$RESULT" != "<unassignedTablets>0</unassignedTablets>" ]]; do
-  sleep 5
-  RESULT=$(curl `cat ${ACCUMULO_CONF_DIR}/monitor`:50095/xml 2>/dev/null \
-    | grep unassignedTablets)
-  echo "$RESULT"
-done
+wait_online
 
 echo "Verify data."
 # Verify
@@ -186,24 +192,11 @@ done
 
 echo "restart."
 # Restart and verify again
-for role in tserver; do
-  pssh -h $ACCUMULO_CONF_DIR/slaves -i 'sudo pkill -f [D]app='$role \; :
-done
-for role in gc monitor tracer master; do
-  pssh -h $ACCUMULO_CONF_DIR/masters -i 'sudo pkill -f [D]app='$role \; :
-done
+stop_all
 pssh -h ${HOSTS} -i 'sudo su - accumulo -c /usr/lib/accumulo/bin/start-here.sh'
 
 # Wait for second online
-$ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.root'
-$ACCUMULO shell -u root -p ${ROOTPW} -e 'scan -np -t accumulo.metadata'
-RESULT=""
-while [[ "$RESULT" != "<unassignedTablets>0</unassignedTablets>" ]]; do
-  sleep 5
-  RESULT=$(curl `cat ${ACCUMULO_CONF_DIR}/monitor`:50095/xml 2>/dev/null \
-    | grep unassignedTablets)
-  echo "$RESULT"
-done
+wait_online
 
 echo "verify."
 printf "${ROOTPW}\n" | /usr/lib/accumulo/bin/tool.sh ${UPGRADE_TEST_16_JAR} \
