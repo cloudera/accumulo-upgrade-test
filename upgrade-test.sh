@@ -36,6 +36,15 @@ UPGRADE_TEST_16_JAR=${UPGRADE_TEST_16_JAR:-${UPGRADE_TEST_DIR}/accumulo-upgrade-
 NUM_MAP_SLOTS=${NUM_MAP_SLOTS:-20}
 NUM_REDUCE_SLOTS=${NUM_REDUCE_SLOTS:-20}
 
+# Sanity check
+for i in TARBALL_14 TARBALL_16 UPGRADE_TEST_14_JAR UPGRADE_TEST_16_JAR HOSTS
+do
+  if [[ ! -r ${!i} ]]; then
+    echo "Invalid value set for $i"
+    exit 1
+  fi
+done
+
 # Convenience
 ACCUMULO="sudo -i -u accumulo /usr/lib/accumulo/bin/accumulo"
 
