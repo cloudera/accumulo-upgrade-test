@@ -71,7 +71,7 @@ import com.beust.jcommander.ParameterException;
 /**
  * MapReduce job to load tables in a variety of Accumulo serializations.
  *
- * XXX You must have the LZO Codec for Hadoop installed to run this job.
+ * If you enable LZO, you must have the codec for Hadoop properly installed.
  *
  * Creates several tables, flexing Accumulo's serialization options:
  *
@@ -79,7 +79,8 @@ import com.beust.jcommander.ParameterException;
  *   <li>Bloom filter on, uncompressed, block cache on
  *   <li>Bloom filter on, snappy compressed, block cache off
  *   <li>Bloom filter off, snappy compressed, block cache on
- *   <li>Bloom filter off, lzo compressed, block cache off
+ *   <li>Bloom filter off, gz compressed, block cache off
+ *   <li><em>optionally</em> Bloom filter off, lzo compressed, block cache off
  * </ul>
  *
  * Then writes a user specified amount of data into each of said tables.
@@ -323,6 +324,12 @@ public class DataCompatibilityLoad extends Configured implements Tool {
         .put(TABLE_BLOCKCACHE_ENABLED.getKey(), Boolean.toString(true))
         .build()),
 
+    gz(new ImmutableMap.Builder<String, String>()
+        .put(TABLE_BLOOM_ENABLED.getKey(), Boolean.toString(false))
+        .put(TABLE_FILE_COMPRESSION_TYPE.getKey(), "gz")
+        .put(TABLE_BLOCKCACHE_ENABLED.getKey(), Boolean.toString(false))
+        .build()),
+
     lzo(new ImmutableMap.Builder<String, String>()
         .put(TABLE_BLOOM_ENABLED.getKey(), Boolean.toString(false))
         .put(TABLE_FILE_COMPRESSION_TYPE.getKey(), "lzo")
@@ -356,6 +363,9 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     @Parameter(names = {"--prefix"}, required = false, description = "prefix to use on generated table names. Defaults to 'data_compatibility_test_'.")
     public String prefix = "data_compatibility_test_";
 
+    @Parameter(names = {"--lzo"}, required = false, description = "elect to include an LZO-compressed table. Requires Hadoop LZO support.")
+    public boolean withLzo = false;
+
     public List<String> getTableNames(TableOperations ops) throws ParameterException, AccumuloException, AccumuloSecurityException {
       return getTableNames(false, ops);
     }
@@ -379,13 +389,18 @@ public class DataCompatibilityLoad extends Configured implements Tool {
         final TableOptions[] options = TableOptions.values();
         names = new ArrayList<String>(options.length);
         for (TableOptions option : options) {
+          if (!withLzo && "lzo".equals(option.getProperties().get(TABLE_FILE_COMPRESSION_TYPE.getKey()))) {
+            log.debug("Skipping table options '" + option + "' because they use LZO compression. pass --lzo to include it.");
+            continue;
+          }
           final String name = prefix + option.toString();
           if (!ops.exists(name)) {
             if (change) {
+              log.info("Creating table for option set '" + option + "'");
               try {
                 ops.create(name);
               } catch (TableExistsException exception) {
-                log.debug("Table created concurrently.",  exception);
+                log.debug("Table created concurrently; skipping.",  exception);
               }
             } else {
               String error = "Generated table name doesn't exist: " + name;
