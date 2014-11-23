@@ -177,7 +177,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
   public static class DataLoadInputFormat extends InputFormat<Text, LongWritable> {
     protected static final String NUM_QUALIFIERS = DataLoadInputFormat.class.getName() + ".num_qualifiers";
     protected static final String NUM_ROWS = DataLoadInputFormat.class.getName() + ".num_rows";
-    protected static final String ACTIVE_TRACKERS = DataLoadInputFormat.class.getName() + ".active_trackers";
+    protected static final String ACTIVE_TSERVERS = DataLoadInputFormat.class.getName() + ".active_tservers";
 
     @Override
     public RecordReader<Text, LongWritable> createRecordReader(InputSplit split, TaskAttemptContext context) throws IOException, InterruptedException {
@@ -188,30 +188,29 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     public List<InputSplit> getSplits(JobContext context) throws IOException, InterruptedException {
       final long numCells = getNumQualifiersPerFamily(context.getConfiguration());
       final int numRows = getNumRows(context.getConfiguration());
-      final List<String> trackers = getActiveTrackers(context.getConfiguration());;
+      final List<String> tservers = getTabletServers(context.getConfiguration());;
       final List<InputSplit> splits = new ArrayList<InputSplit>(numRows);
-      if (trackers.size() == 0) {
-        log.warn("Couldn't get set of active trackers on the cluster, map tasks won't have locality information");
+      if (tservers.size() == 0) {
+        log.warn("Couldn't get set of active tservers on the cluster, map tasks won't have locality information");
         for (int i = 0; i < numRows; i++) {
-          splits.add(new MapperSlotInputSplit(numCells, null));
+          splits.add(new TabletServerLocalInputSplit(numCells, null));
         }
       } else {
         for (int i = 0; i < numRows;) {
-          for (int j = 0; j < trackers.size() && i < numRows; j++, i++) {
-            splits.add(new MapperSlotInputSplit(numCells, trackers.get(j)));
+          for (int j = 0; j < tservers.size() && i < numRows; j++, i++) {
+            splits.add(new TabletServerLocalInputSplit(numCells, tservers.get(j)));
           }
         }
       }
       return splits;
     }
 
-    public static void inferActiveTrackers(Job job) throws IOException {
-      final Configuration conf = job.getConfiguration();
-      conf.setStrings(ACTIVE_TRACKERS, (new JobClient(new JobConf(conf))).getClusterStatus().getActiveTrackerNames().toArray(new String[0]));
+    public static void setTabletServers(Job job, List<String> tabletServers) throws IOException {
+      job.getConfiguration().setStrings(ACTIVE_TSERVERS, tabletServers.toArray(new String[0]));
     }
 
-    public static List<String> getActiveTrackers(Configuration conf) {
-      return new ArrayList<String>(conf.getStringCollection(ACTIVE_TRACKERS));
+    public static List<String> getTabletServers(Configuration conf) {
+      return new ArrayList<String>(conf.getStringCollection(ACTIVE_TSERVERS));
     }
 
     public static void setNumQualifiersPerFamily(Job job, long num) {
@@ -230,15 +229,15 @@ public class DataCompatibilityLoad extends Configured implements Tool {
       return conf.getInt(NUM_ROWS, DataCompatibilityTestCli.DEFAULT_NUM_ROWS);
     }
 
-    public static class MapperSlotInputSplit extends InputSplit implements WritableComparable<MapperSlotInputSplit> {
+    public static class TabletServerLocalInputSplit extends InputSplit implements WritableComparable<TabletServerLocalInputSplit> {
       long numCells;
       String[] locations;
-      public MapperSlotInputSplit() {
+      public TabletServerLocalInputSplit() {
         this(0, null);
       }
-      public MapperSlotInputSplit(long num, String tracker) {
+      public TabletServerLocalInputSplit(long num, String tabletServer) {
         numCells = num;
-        locations = null == tracker ? new String[] {} : new String[] { tracker };
+        locations = null == tabletServer ? new String[] {} : new String[] { tabletServer };
       }
       @Override
       public long getLength() {
@@ -257,7 +256,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
         numCells = WritableUtils.readVLong(in);
       }
       @Override
-      public int compareTo(MapperSlotInputSplit other) {
+      public int compareTo(TabletServerLocalInputSplit other) {
         return (int) (numCells - other.numCells);
       }
     }
@@ -447,7 +446,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     job.setJarByClass(this.getClass());
     
     job.setInputFormatClass(DataLoadInputFormat.class);
-    DataLoadInputFormat.inferActiveTrackers(job);
+    DataLoadInputFormat.setTabletServers(job, options.connection.getConnector().instanceOperations().getTabletServers());
     DataLoadInputFormat.setNumRows(job, options.test.numRows);
     DataLoadInputFormat.setNumQualifiersPerFamily(job, options.test.qualifiers);
 
@@ -457,13 +456,39 @@ public class DataCompatibilityLoad extends Configured implements Tool {
  
     final List<String> names = options.test.getTableNamesAndConfigureThem(ops);
     for (String name : names) {
-      if (options.test.numRows > ops.getSplits(name, options.test.numRows).size()) {
+      final int numSplits = ops.getSplits(name, options.test.numRows).size();
+      if (options.test.numRows > numSplits) {
+        log.info("adding splits to table '" + name + "', to bring it from " + numSplits +  " to " + options.test.numRows + ".");
         final SortedSet<Text> splits = new TreeSet<Text>();
+        // for cases where we're adding way more splits than there are currently possible servers to handle them, do a pre-pre-split
+        //   N.B. If we've just created this table, there will be 0 splits because we'll just have the initial tablet.
+        if (0 == numSplits || options.test.numRows / numSplits > 10) {
+          log.info("splitting in two waves due to the number of splits we need to add.");
+          // TODO turtles all the way down.
+          final int prepre = options.test.numRows / (0 == numSplits ? 10 : numSplits * 10);
+          for (int i = 0; i < prepre ; i++) {
+            splits.add(new Text(new StringBuilder(Long.toString(i)).reverse().toString()));
+          }
+          ops.addSplits(name, splits);
+          log.debug("delay 30s for splits to get assigned off host.");
+          try {
+            Thread.currentThread().sleep(30*1000);
+          } catch (InterruptedException exception) {
+            log.warn("interrupted from sleep early.");
+          }
+          splits.clear();
+        }
         for (int i = 0; i < options.test.numRows; i++) {
           splits.add(new Text(new StringBuilder(Long.toString(i)).reverse().toString()));
         }
         ops.addSplits(name, splits);
       }
+    }
+    log.debug("delay 30s for splits to get assigned off host.");
+    try {
+      Thread.currentThread().sleep(30*1000);
+    } catch (InterruptedException exception) {
+      log.warn("interrupted from sleep early.");
     }
 
     job.getConfiguration().setStrings(OUTPUT_TABLE_NAMES, names.toArray(new String[0]));
@@ -475,6 +500,7 @@ public class DataCompatibilityLoad extends Configured implements Tool {
     
     job.setNumReduceTasks(0);
     
+    log.info("launching map-only job to insert " + options.test.numRows + " rows of " + (FAMILIES.length * options.test.qualifiers) + " cells each into each of the tables " + names);
     options.output.useAccumuloOutputFormat(job);
     
     job.waitForCompletion(true);
