@@ -76,8 +76,7 @@
             </manifestEntries>
           </archive>
           <includes>
-            <include>org/apache/accumulo**/**</include>
-            <include>**/META-INF/*</include>
+            <include>com/cloudera/accumulo/**</include>
           </includes>
         </configuration>
       </plugin>

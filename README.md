@@ -27,12 +27,13 @@ version of Accumulo, checkout the appropriate tag first. Then:
 mvn clean package
 ```
 
-Use `mvn dependency:copy-dependencies` to gather the dependencies needed to run
-the tool.
+Use `mvn dependency:copy-dependencies -DincludeScope=runtime` to gather the
+dependencies needed to run the tool.
 
 ## Configuring for LZO
 
-Before loading in data, the test cluster must be configured for LZO compression.
+Optionally, tests can include working with an LZO compressed table. To do so, the
+test cluster must be configured for LZO compression prior to loading data.
 Under CM/CDH, there is a "gplextras" parcel that must be installed.
 [CM4 instructions][1] are available. This will create a new parcel directory
 called "HADOOP_LZO".
@@ -67,7 +68,9 @@ Fill in the appropriate "version" value for the JARs, and use the correct
 ZooKeeper hosts and instance name for your cluster. You will be prompted for
 the connection password before the job begins.
 
-Run the load tool with `-h` to see a summary of the available options.
+Run the load tool with `-h` to see a summary of the available options. In particular,
+you probably want to use `--num-rows` equal to the number of execution slots in the
+cluster.
 
 ## Verifying
 
@@ -81,6 +84,8 @@ fashion.
   -i instancename -p
 ```
 
-Again, run with `-h` to see an option summary.
+Again, run with `-h` to see an option summary. The options you pass for number of rows,
+families, and qualifiers must match those given to the load tool.
+
 [1]: http://www.cloudera.com/content/cloudera-content/cloudera-docs/CM4Ent/latest/Cloudera-Manager-Installation-Guide/cmig_install_LZO_Compression.html
 [2]: https://code.google.com/a/apache-extras.org/p/hadoop-gpl-compression/wiki/FAQ
